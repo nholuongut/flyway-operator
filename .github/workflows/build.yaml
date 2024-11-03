@@ -1,0 +1,85 @@
+name: build
+
+on:
+  pull_request:
+    branches:
+    - "*"
+    paths-ignore:
+    - config/helm-chart/**
+  push:
+    branches:
+    - main
+    tags:
+    - "v*"
+    paths-ignore:
+    - config/helm-chart/**
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, 'skip ci')"
+    permissions:
+      checks: write
+      contents: write
+      packages: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: fregante/setup-git-user@v2.0.2
+      - name: createVersion
+        run: |
+          GIT_VERSION=$(git describe --tag --always --match "v*")
+          echo "GIT_VERSION=${GIT_VERSION}" >> $GITHUB_ENV
+          echo "VERSION=$(echo ${GIT_VERSION} | sed s/^v//)" >> $GITHUB_ENV
+
+      - name: setup go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6.1.1
+        with:
+          args: --timeout=10m
+
+      - name: run tests
+        run: |
+          make test
+
+      - uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }} # required
+
+      - name: 'Login to GitHub Container Registry'
+        uses: docker/login-action@v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push
+        run: |
+          make docker-buildx VERSION=${{ env.VERSION }}
+
+      - name: bundle
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        run: |
+          make bundle bundle-build bundle-push VERSION=${{ env.VERSION }}
+
+      - name: catalog
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          make update-catalog-template catalog-build catalog-push VERSION=${{ env.VERSION }}
+
+          # re-tag as alpha, so that we can stick to a single channel
+          echo re-tagging
+          make catalog-retag VERSION=${{ env.VERSION }}
+
+      - name: createRelease
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: marvinpinto/action-automatic-releases@v1.2.1
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          prerelease: false
